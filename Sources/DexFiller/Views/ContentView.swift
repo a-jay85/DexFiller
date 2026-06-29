@@ -97,6 +97,7 @@ struct ContentView: View {
             if viewModel.showingReview {
                 ReviewView(
                     records: viewModel.flaggedRecords,
+                    onUpdateCP: { id, cp in viewModel.updateCP(recordID: id, cp: cp) },
                     onDismiss: { viewModel.showingReview = false }
                 )
             } else {
