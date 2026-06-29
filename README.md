@@ -78,4 +78,4 @@ swift test       # run the unit suite
 
 ## License
 
-Not yet specified.
+[MIT](LICENSE) © 2026 A-Jay Nicolas
