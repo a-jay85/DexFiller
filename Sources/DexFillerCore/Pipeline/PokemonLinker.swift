@@ -1,11 +1,14 @@
 import Foundation
 
-/// Links appraisal data with the preceding info screen data
-/// to produce complete PokemonRecord objects.
+/// Links appraisal data with the adjacent info-screen data to produce complete
+/// PokemonRecord objects.
 ///
-/// The expected flow in a Pokemon GO recording is:
-/// Info Screen → Appraisal Overlay → Info Screen → Appraisal Overlay → ...
-/// Each appraisal is linked to the most recent preceding info screen.
+/// A Pokemon GO recording shows each Pokemon as an info screen and an appraisal
+/// overlay, but the capture can be in either order (info→appraisal when tapping
+/// "Appraise", or appraisal→info when backing out). So an appraisal is paired
+/// with a *temporally adjacent* info screen on either side; a second screen of
+/// the same kind flushes the unpaired one rather than letting it reach across to
+/// a different Pokemon.
 public final class PokemonLinker: Sendable {
 
     /// Confidence cap applied when CP could not be read, so the record drops
@@ -18,51 +21,82 @@ public final class PokemonLinker: Sendable {
     /// Groups should be in chronological order.
     public func link(groups: [FrameGroup], infoExtractor: InfoScreenExtractor, appraisalExtractor: AppraisalExtractor) async throws -> [PokemonRecord] {
         var records: [PokemonRecord] = []
-        var lastInfoRecord: PokemonRecord?
+        var pendingInfo: PokemonRecord?
+        var pendingAppraisal: (result: AppraisalResult, timestamp: Double)?
 
         for group in groups {
             switch group.screenType {
             case .infoScreen:
-                let result = try await infoExtractor.extract(from: group.bestFrame.image)
-                var record = result.record
-                record.infoFrameTimestamp = group.bestFrame.timestamp
-                lastInfoRecord = record
+                var info = try await infoExtractor.extract(from: group.bestFrame.image).record
+                info.infoFrameTimestamp = group.bestFrame.timestamp
+                if let appraisal = pendingAppraisal {
+                    // Appraisal immediately preceded this info — same Pokemon.
+                    records.append(merge(info: info, appraisal: appraisal.result, appraisalTimestamp: appraisal.timestamp))
+                    pendingAppraisal = nil
+                } else {
+                    if let prev = pendingInfo { records.append(partial(prev)) }
+                    pendingInfo = info
+                }
 
             case .appraisalOverlay:
-                let appraisalResult = try await appraisalExtractor.extract(from: group.bestFrame.image)
-                records.append(merge(
-                    info: lastInfoRecord,
-                    appraisal: appraisalResult,
-                    appraisalTimestamp: group.bestFrame.timestamp
-                ))
-                lastInfoRecord = nil // Consumed (or there was none)
+                let result = try await appraisalExtractor.extract(from: group.bestFrame.image)
+                let timestamp = group.bestFrame.timestamp
+                if let info = pendingInfo {
+                    records.append(merge(info: info, appraisal: result, appraisalTimestamp: timestamp))
+                    pendingInfo = nil
+                } else {
+                    if let prev = pendingAppraisal {
+                        records.append(merge(info: nil, appraisal: prev.result, appraisalTimestamp: prev.timestamp))
+                    }
+                    pendingAppraisal = (result, timestamp)
+                }
 
             case .other:
                 continue
             }
         }
 
-        // If there's a trailing info screen without appraisal, include it as partial
-        if var record = lastInfoRecord {
-            record.confidence *= 0.7 // Lower confidence without appraisal
-            records.append(record)
+        // Flush any unpaired trailing screen.
+        if let info = pendingInfo { records.append(partial(info)) }
+        if let appraisal = pendingAppraisal {
+            records.append(merge(info: nil, appraisal: appraisal.result, appraisalTimestamp: appraisal.timestamp))
         }
 
         return records
+    }
+
+    /// Whether a string looks like a Pokemon name/nickname rather than misread
+    /// chrome (a clock "16:36", a bare number). Requires at least one letter and
+    /// rejects a leading time pattern.
+    private static func isNameLike(_ text: String) -> Bool {
+        guard text.contains(where: \.isLetter) else { return false }
+        return text.range(of: #"^\s*\d{1,2}:\d{2}"#, options: .regularExpression) == nil
+    }
+
+    /// An info screen with no appraisal to pair with: lower confidence and no IVs.
+    private func partial(_ info: PokemonRecord) -> PokemonRecord {
+        var record = info
+        record.confidence *= 0.7
+        return record
     }
 
     /// Combine an appraisal read with the preceding info-screen record (if any)
     /// into one `PokemonRecord`. Pure and `internal` so the merge rules can be
     /// unit-tested without synthesizing frames.
     ///
-    /// Field provenance:
+    /// Field provenance. The appraisal screen is the *validated* source (281
+    /// fixtures); the info-screen extractor uses loose positional heuristics that
+    /// misfire on real video (e.g. the status-bar clock read as the species). So
+    /// every field the appraisal carries wins; the info screen only fills gaps.
     /// - IVs: always from the appraisal bars.
-    /// - species: the appraisal **caption** is canonical — it carries the true
-    ///   species even for renamed Pokemon, whereas the info screen's "species" is
-    ///   really the title/nickname. So the caption overrides; any differing info
-    ///   title is preserved in `nickname`.
-    /// - CP / catch date / location: the info screen is authoritative; appraisal
-    ///   only fills what the info screen left blank.
+    /// - species: from the appraisal **caption** — the true species even for
+    ///   renamed Pokemon (the info "species" is really the title/nickname). Any
+    ///   differing info title is preserved in `nickname`.
+    /// - catch date / location: from the appraisal caption only. The info
+    ///   extractor's versions are unreliable ("STARDUST" read as location), so an
+    ///   empty field beats filling it with garbage.
+    /// - CP: info fills only when appraisal couldn't read it (both sources read
+    ///   the same top-center number reliably; info covers the obscured-CP case).
     /// - confidence: minimum across the info record, the IV read, and any
     ///   appraisal field relied on. When CP is entirely unreadable the record is
     ///   capped so it falls below the review threshold (manual entry needed).
@@ -76,22 +110,26 @@ public final class PokemonLinker: Sendable {
         var confidences: [Double] = [appraisal.overallConfidence]
         if info != nil { confidences.append(record.confidence) }
 
-        // Species: caption is canonical; displaced info title becomes the nickname.
+        // Species: caption is canonical; a displaced *name-like* info title is
+        // kept as the nickname (the info "species" is often garbage like a clock).
         if let species = appraisal.species {
-            if let infoTitle = record.species, infoTitle != species.value, record.nickname == nil {
+            if let infoTitle = record.species, infoTitle != species.value,
+               record.nickname == nil, Self.isNameLike(infoTitle) {
                 record.nickname = infoTitle
             }
             record.species = species.value
             confidences.append(species.confidence)
         }
 
-        // CP / date / location: fill only where the info screen left a gap.
+        // Catch date / location: appraisal caption only (info versions unreliable).
+        record.catchDate = appraisal.catchDate?.value
+        record.catchLocation = appraisal.catchLocation?.value
+
+        // CP: info is kept; appraisal only fills the obscured-CP gap.
         if record.cp == nil, let cp = appraisal.cp {
             record.cp = cp.value
             confidences.append(cp.confidence)
         }
-        if record.catchDate == nil { record.catchDate = appraisal.catchDate?.value }
-        if record.catchLocation == nil { record.catchLocation = appraisal.catchLocation?.value }
 
         var confidence = confidences.min() ?? 0
         if record.cp == nil { confidence = min(confidence, Self.unverifiedCPConfidence) }
