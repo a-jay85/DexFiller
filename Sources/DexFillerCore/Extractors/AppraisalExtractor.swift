@@ -47,16 +47,29 @@ public final class AppraisalExtractor: Sendable {
 
     // MARK: - Public API
 
-    /// Extract IV values from an appraisal screen frame.
+    /// Extract IV values (from the stat bars) plus CP and species/date/location
+    /// (via OCR) from an appraisal screen frame. The appraisal screen is
+    /// self-sufficient for everything except moves, which live on the info screen.
     public func extract(from frame: FrameImage) async throws -> AppraisalResult {
+        // Text fields come from OCR over the whole frame; the bars come from pixels.
+        let textBlocks = (try? await TextRecognizer.recognize(in: frame.cgImage)) ?? []
+        let cp = extractCP(from: textBlocks)
+        let caught = extractCaughtLine(from: textBlocks)
+
         guard let pixels = RGBABuffer(frame.cgImage) else {
-            return AppraisalResult(attackIV: nil, defenseIV: nil, staminaIV: nil)
+            return AppraisalResult(
+                attackIV: nil, defenseIV: nil, staminaIV: nil,
+                cp: cp, species: caught?.species, catchDate: caught?.date, catchLocation: caught?.location
+            )
         }
 
         let bands = findBarBands(pixels)
         guard bands.count == 3 else {
             // Not three clean bars — likely not an expanded appraisal panel.
-            return AppraisalResult(attackIV: nil, defenseIV: nil, staminaIV: nil)
+            return AppraisalResult(
+                attackIV: nil, defenseIV: nil, staminaIV: nil,
+                cp: cp, species: caught?.species, catchDate: caught?.date, catchLocation: caught?.location
+            )
         }
 
         // Bands are sorted top→bottom = Attack, Defense, HP(stamina).
@@ -64,7 +77,86 @@ public final class AppraisalExtractor: Sendable {
         let defense = decodeBar(pixels, rowY: bands[1])
         let stamina = decodeBar(pixels, rowY: bands[2])
 
-        return AppraisalResult(attackIV: attack, defenseIV: defense, staminaIV: stamina)
+        return AppraisalResult(
+            attackIV: attack, defenseIV: defense, staminaIV: stamina,
+            cp: cp, species: caught?.species, catchDate: caught?.date, catchLocation: caught?.location
+        )
+    }
+
+    // MARK: - Text Extraction (CP, species, catch date/location)
+
+    /// Plausible CP range for a Pokemon. Vision can return a confident misread on
+    /// the stylized CP digits over a busy background, so we reject out-of-range
+    /// values rather than trust them.
+    private static let cpRange = 10...6000
+
+    /// CP is shown top-center as "CP444"/"cp 444". Restrict to the top of the
+    /// screen (Vision origin is bottom-left, so top = high Y) to avoid matching
+    /// stray digits elsewhere.
+    ///
+    /// A clean Latin "CP" prefix is required: when the arc/sprite crosses the
+    /// digits Vision injects noise ("CP9.23") that we can safely strip, but when
+    /// it garbles the prefix itself (Cyrillic "Р", "฿", or no prefix) a digit is
+    /// usually lost too — yielding a plausible but wrong CP. Those are left
+    /// unread so the record drops below threshold and is flagged for manual
+    /// entry, rather than emitting a confident-wrong value.
+    private func extractCP(from blocks: [RecognizedTextBlock]) -> FieldResult<Int>? {
+        for block in blocks where block.boundingBox.midY > 0.85 {
+            let text = block.text.uppercased().replacingOccurrences(of: " ", with: "")
+            guard text.hasPrefix("CP") else { continue }
+            let digits = text.dropFirst(2).filter(\.isNumber)
+            if let value = Int(digits), Self.cpRange.contains(value) {
+                return FieldResult(value: value, confidence: block.confidence)
+            }
+        }
+        return nil
+    }
+
+    /// The appraisal screen's bottom caption reads
+    /// "This <species> was caught on <date> around <location>." — and always uses
+    /// the true species, even when the Pokemon has been renamed (the title shows
+    /// the nickname; this line does not). It yields species, catch date, and
+    /// location. Vision may split it across blocks, so we match over the joined
+    /// text; the caption can also wrap and have its tail cut off the bottom of a
+    /// single frame, so species is captured independently of date/location.
+    private func extractCaughtLine(
+        from blocks: [RecognizedTextBlock]
+    ) -> (species: FieldResult<String>, date: FieldResult<String>?, location: FieldResult<String>?)? {
+        // Only the lower portion of the screen carries this caption.
+        let lower = blocks.filter { $0.boundingBox.midY < 0.25 }
+        guard !lower.isEmpty else { return nil }
+
+        let joined = lower.map(\.text).joined(separator: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+        let captionConfidence = lower.map(\.confidence).min() ?? 0
+
+        // Species: lenient — only needs "This <species> was caught" to be present,
+        // so a caption whose date/location line is cut off still yields a species.
+        guard let name = firstGroup(in: joined, pattern: #"This\s+(.+?)\s+was\s+caught"#),
+              !name.isEmpty else {
+            return nil
+        }
+        let species = FieldResult(value: name, confidence: captionConfidence)
+
+        // Date and location are best-effort from whatever of the line is present.
+        let date = firstGroup(in: joined, pattern: #"caught\s+on\s+([\d/.-]+)"#)
+            .map { FieldResult(value: $0, confidence: captionConfidence) }
+        let location = firstGroup(in: joined, pattern: #"(?:around|in)\s+(.+?)\.\s*$"#)
+            .map { FieldResult(value: $0, confidence: captionConfidence) }
+
+        return (species, date, location)
+    }
+
+    /// First capture group of `pattern` (case-insensitive) in `text`, trimmed.
+    private func firstGroup(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return nil
+        }
+        let ns = text as NSString
+        guard let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges >= 2 else { return nil }
+        let value = ns.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     // MARK: - Bar Band Detection
@@ -243,6 +335,34 @@ public struct AppraisalResult: Sendable {
     public let defenseIV: FieldResult<Int>?
     public let staminaIV: FieldResult<Int>?
 
+    /// CP read from the top of the screen (nil if obscured/unreadable).
+    public let cp: FieldResult<Int>?
+    /// Display name from the "This … was caught on …" caption. Equals the species
+    /// for un-renamed Pokemon; holds the nickname if the Pokemon was renamed.
+    public let species: FieldResult<String>?
+    public let catchDate: FieldResult<String>?
+    public let catchLocation: FieldResult<String>?
+
+    public init(
+        attackIV: FieldResult<Int>?,
+        defenseIV: FieldResult<Int>?,
+        staminaIV: FieldResult<Int>?,
+        cp: FieldResult<Int>? = nil,
+        species: FieldResult<String>? = nil,
+        catchDate: FieldResult<String>? = nil,
+        catchLocation: FieldResult<String>? = nil
+    ) {
+        self.attackIV = attackIV
+        self.defenseIV = defenseIV
+        self.staminaIV = staminaIV
+        self.cp = cp
+        self.species = species
+        self.catchDate = catchDate
+        self.catchLocation = catchLocation
+    }
+
+    /// Confidence of the IV bar read only — the validated Phase 0 signal. Kept
+    /// separate from CP/species so OCR confidence never perturbs the IV path.
     public var overallConfidence: Double {
         let confidences = [attackIV?.confidence, defenseIV?.confidence, staminaIV?.confidence].compactMap { $0 }
         return confidences.min() ?? 0

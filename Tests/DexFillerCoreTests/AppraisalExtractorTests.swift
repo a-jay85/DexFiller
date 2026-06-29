@@ -69,6 +69,39 @@ final class AppraisalExtractorTests: XCTestCase {
         )
     }
 
+    /// Coverage regression for the OCR text fields the appraisal screen carries
+    /// on its own (species + CP). The labeled rows are exactly the true appraisal
+    /// screens, so every one should yield a species; CP is allowed a small miss
+    /// rate because the arc/sprite can cross the digits — those cases must read
+    /// `nil` (→ flagged for manual entry) rather than a wrong value.
+    func testExtractsSpeciesAndCPFromAppraisal() async throws {
+        let csvURL = fixturesDir.appendingPathComponent("baseline_labels.csv")
+        let imagesDir = fixturesDir.appendingPathComponent("baseline")
+        guard FileManager.default.fileExists(atPath: csvURL.path),
+              FileManager.default.fileExists(atPath: imagesDir.path) else {
+            throw XCTSkip("Baseline fixtures not present; skipping appraisal OCR regression.")
+        }
+
+        let labels = try parseLabels(csvURL)
+        XCTAssertFalse(labels.isEmpty)
+
+        let extractor = AppraisalExtractor()
+        var checked = 0, speciesRead = 0, cpRead = 0
+        for label in labels {
+            guard let cgImage = loadCGImage(imagesDir.appendingPathComponent(label.file)) else { continue }
+            let result = try await extractor.extract(from: FrameImage(cgImage))
+            checked += 1
+            if result.species != nil { speciesRead += 1 }
+            if result.cp != nil { cpRead += 1 }
+        }
+
+        XCTAssertGreaterThan(checked, 0)
+        let speciesRate = Double(speciesRead) / Double(checked)
+        let cpRate = Double(cpRead) / Double(checked)
+        XCTAssertGreaterThanOrEqual(speciesRate, 0.98, "species read on \(speciesRead)/\(checked)")
+        XCTAssertGreaterThanOrEqual(cpRate, 0.95, "CP read on \(cpRead)/\(checked)")
+    }
+
     // MARK: - Helpers
 
     /// Parse labeled rows, skipping NO_PANEL / unlabeled rows.
