@@ -72,14 +72,19 @@ final class ProcessingViewModel: ObservableObject {
         }
     }
 
-    /// Apply a manual CP correction (from review) to both the master records and
-    /// the flagged subset, so the edit shows in the table and the CSV export.
+    /// Apply a manual CP correction (from review) to the master records, and
+    /// drop the record from the review queue once a CP has been entered (clearing
+    /// CP back to nil keeps it flagged). The edit shows in the table and export.
     func updateCP(recordID: UUID, cp: Int?) {
         if let i = records.firstIndex(where: { $0.id == recordID }) {
             records[i].cp = cp
         }
         if let j = flaggedRecords.firstIndex(where: { $0.id == recordID }) {
-            flaggedRecords[j].cp = cp
+            if cp != nil {
+                flaggedRecords.remove(at: j) // CP verified — resolved
+            } else {
+                flaggedRecords[j].cp = cp
+            }
         }
     }
 

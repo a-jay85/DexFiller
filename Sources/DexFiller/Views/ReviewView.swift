@@ -27,9 +27,11 @@ struct ReviewView: View {
 
                 Spacer()
 
-                Text("\(currentIndex + 1) of \(records.count)")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                if !records.isEmpty {
+                    Text("\(min(currentIndex, records.count - 1) + 1) of \(records.count)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
             .padding()
 
@@ -42,8 +44,10 @@ struct ReviewView: View {
                     description: Text("All entries have sufficient confidence.")
                 )
             } else {
-                // Record detail
-                let record = records[currentIndex]
+                // Record detail. Clamp the index: the list shrinks as records are
+                // resolved, which can leave currentIndex past the end for a render.
+                let index = min(currentIndex, records.count - 1)
+                let record = records[index]
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -98,16 +102,16 @@ struct ReviewView: View {
                 // Navigation
                 HStack {
                     Button("Previous") {
-                        if currentIndex > 0 { currentIndex -= 1 }
+                        currentIndex = max(0, index - 1)
                     }
-                    .disabled(currentIndex == 0)
+                    .disabled(index == 0)
 
                     Spacer()
 
                     Button("Next") {
-                        if currentIndex < records.count - 1 { currentIndex += 1 }
+                        currentIndex = min(records.count - 1, index + 1)
                     }
-                    .disabled(currentIndex >= records.count - 1)
+                    .disabled(index >= records.count - 1)
                 }
                 .padding()
             }
