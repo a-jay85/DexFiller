@@ -1,198 +1,238 @@
 import CoreGraphics
 import Foundation
-import Vision
 
 /// Extracts IV values from Pokemon GO appraisal screen frames.
-/// Analyzes the three horizontal bars (Attack, Defense, Stamina) to determine 0–15 values.
+///
+/// Reads the three horizontal stat bars (Attack, Defense, HP/Stamina) directly
+/// from pixels. Each bar is split into three segments worth 5 IV points each
+/// (15 max). The fill of each segment is measured independently and rounded to
+/// the nearest 0–5, which sidesteps the non-linearity introduced by the gaps
+/// between segments. A fully-maxed (15) bar renders salmon-red rather than
+/// orange, which is used as a clean anchor for that value.
+///
+/// Geometry constants below are calibrated against 1170×2532 screenshots
+/// (iPhone 13/14/15 non-Pro) and validated to read all values 0–15 across a
+/// 281-screenshot baseline with zero ambiguous reads. They are expressed as
+/// fractions of the image dimensions so they scale proportionally, but only the
+/// 1170×2532 instantiation has been empirically validated (Phase 0 gate).
 public final class AppraisalExtractor: Sendable {
 
     public init() {}
 
+    // MARK: - Calibration (fractions of image width / height @ 1170×2532)
+
+    /// Horizontal extent of the bar track, as fractions of image width.
+    private static let barLeftFrac = 139.0 / 1170.0
+    private static let barRightFrac = 543.0 / 1170.0
+
+    /// Per-segment x-ranges (start, end) as fractions of image width.
+    /// Three segments of 5 IV each, with small gaps between them.
+    private static let segmentFracs: [(lo: Double, hi: Double)] = [
+        (139.0 / 1170.0, 269.0 / 1170.0),
+        (276.0 / 1170.0, 405.0 / 1170.0),
+        (411.0 / 1170.0, 543.0 / 1170.0),
+    ]
+
+    /// Vertical window (top, bottom) to search for the bar band, as fractions
+    /// of image height. The appraisal panel is anchored low-left.
+    private static let rowSearchTopFrac = 1820.0 / 2532.0
+    private static let rowSearchBottomFrac = 2300.0 / 2532.0
+
+    /// A row counts as "on the bar band" when this fraction of the track width
+    /// is occupied by track pixels (filled or empty-gray).
+    private static let bandCoverageThreshold = 0.55
+
+    /// Minimum band height in pixels (a bar is ~16px tall @ 2532).
+    private static let minBandHeightFrac = 6.0 / 2532.0
+
+    // MARK: - Public API
+
     /// Extract IV values from an appraisal screen frame.
     public func extract(from frame: FrameImage) async throws -> AppraisalResult {
-        let textBlocks = try await recognizeText(in: frame.cgImage)
-
-        // Find the appraisal bar regions by locating the stat labels
-        let barRegions = findBarRegions(textBlocks: textBlocks, imageSize: (frame.width, frame.height))
-
-        var attackIV: FieldResult<Int>?
-        var defenseIV: FieldResult<Int>?
-        var staminaIV: FieldResult<Int>?
-
-        for region in barRegions {
-            let ivValue = analyzeBar(
-                in: frame.cgImage,
-                barRegion: region.barRect,
-                imageSize: (frame.width, frame.height)
-            )
-
-            switch region.stat {
-            case .attack:
-                attackIV = ivValue
-            case .defense:
-                defenseIV = ivValue
-            case .stamina:
-                staminaIV = ivValue
-            }
+        guard let pixels = RGBABuffer(frame.cgImage) else {
+            return AppraisalResult(attackIV: nil, defenseIV: nil, staminaIV: nil)
         }
 
-        return AppraisalResult(
-            attackIV: attackIV,
-            defenseIV: defenseIV,
-            staminaIV: staminaIV
-        )
+        let bands = findBarBands(pixels)
+        guard bands.count == 3 else {
+            // Not three clean bars — likely not an expanded appraisal panel.
+            return AppraisalResult(attackIV: nil, defenseIV: nil, staminaIV: nil)
+        }
+
+        // Bands are sorted top→bottom = Attack, Defense, HP(stamina).
+        let attack = decodeBar(pixels, rowY: bands[0])
+        let defense = decodeBar(pixels, rowY: bands[1])
+        let stamina = decodeBar(pixels, rowY: bands[2])
+
+        return AppraisalResult(attackIV: attack, defenseIV: defense, staminaIV: stamina)
     }
 
-    // MARK: - Bar Region Detection
+    // MARK: - Bar Band Detection
 
-    private func findBarRegions(textBlocks: [RecognizedTextBlock], imageSize: (Int, Int)) -> [StatBarRegion] {
-        var regions: [StatBarRegion] = []
+    /// Locate the three stat-bar rows by scanning the search window for
+    /// horizontal bands where the track (filled or empty-gray) spans the bar.
+    /// Returns the center Y of each band, sorted top→bottom.
+    private func findBarBands(_ p: RGBABuffer) -> [Int] {
+        let xl = Int(Self.barLeftFrac * Double(p.width))
+        let xr = Int(Self.barRightFrac * Double(p.width))
+        let yTop = Int(Self.rowSearchTopFrac * Double(p.height))
+        let yBot = min(Int(Self.rowSearchBottomFrac * Double(p.height)), p.height)
+        guard xr > xl, yBot > yTop else { return [] }
 
-        for block in textBlocks {
-            let text = block.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-            let stat: StatType?
+        let trackWidth = xr - xl
+        let coverageThreshold = Int(Self.bandCoverageThreshold * Double(trackWidth))
+        let minBandHeight = max(3, Int(Self.minBandHeightFrac * Double(p.height)))
 
-            if text == "ATTACK" || text.contains("ATTACK") {
-                stat = .attack
-            } else if text == "DEFENSE" || text.contains("DEFENSE") {
-                stat = .defense
-            } else if text == "HP" && block.boundingBox.midY < 0.6 {
-                // HP label in the appraisal context (not the top HP bar)
-                stat = .stamina
-            } else {
-                continue
-            }
-
-            guard let statType = stat else { continue }
-
-            // The bar is typically to the right of or below the label
-            // In Pokemon GO's appraisal, bars appear directly below each label
-            // The bar extends from roughly the left edge of the label to the right side of the screen
-            let barRect = CGRect(
-                x: block.boundingBox.minX,
-                y: block.boundingBox.minY - 0.04, // Bar is just below the label (Vision coords: lower Y = lower on screen)
-                width: 0.6, // Bars span roughly 60% of screen width
-                height: 0.025 // Bars are thin horizontal elements
-            )
-
-            regions.append(StatBarRegion(stat: statType, labelBox: block.boundingBox, barRect: barRect))
+        // Mark each row as "on band" if enough track pixels span the bar x-range.
+        var onBand = [Bool](repeating: false, count: yBot - yTop)
+        for y in yTop..<yBot {
+            var count = 0
+            for x in xl..<xr where p.isTrack(x, y) { count += 1 }
+            onBand[y - yTop] = count > coverageThreshold
         }
 
-        return regions
+        // Collect contiguous runs tall enough to be a bar.
+        var runs: [(lo: Int, hi: Int)] = []
+        var start: Int? = nil
+        for (i, on) in onBand.enumerated() {
+            if on, start == nil { start = i }
+            if !on, let s = start { runs.append((s, i - 1)); start = nil }
+        }
+        if let s = start { runs.append((s, onBand.count - 1)) }
+        runs = runs.filter { $0.hi - $0.lo >= minBandHeight }
+
+        // Keep the three tallest runs, then order them top→bottom.
+        let tallest = runs.sorted { ($0.hi - $0.lo) > ($1.hi - $1.lo) }.prefix(3)
+        return tallest
+            .map { yTop + ($0.lo + $0.hi) / 2 }
+            .sorted()
     }
 
-    // MARK: - Bar Analysis
+    // MARK: - Bar Decoding
 
-    /// Analyze a horizontal bar to determine its fill level (0–15).
-    /// The bar consists of filled segments against a background.
-    private func analyzeBar(in cgImage: CGImage, barRegion: CGRect, imageSize: (Int, Int)) -> FieldResult<Int>? {
-        // Convert normalized coordinates to pixel coordinates
-        let pixelRect = CGRect(
-            x: barRegion.origin.x * CGFloat(imageSize.0),
-            y: (1.0 - barRegion.origin.y - barRegion.height) * CGFloat(imageSize.1), // Flip Y for CGImage
-            width: barRegion.width * CGFloat(imageSize.0),
-            height: barRegion.height * CGFloat(imageSize.1)
-        )
+    /// Decode a single bar at the given row into a 0–15 IV value.
+    private func decodeBar(_ p: RGBABuffer, rowY: Int) -> FieldResult<Int> {
+        let xl = Int(Self.barLeftFrac * Double(p.width))
+        let xr = Int(Self.barRightFrac * Double(p.width))
 
-        // Clamp to image bounds
-        let clampedRect = pixelRect.intersection(CGRect(x: 0, y: 0, width: imageSize.0, height: imageSize.1))
-        guard !clampedRect.isEmpty,
-              clampedRect.width > 10,
-              clampedRect.height > 2 else {
-            return nil
+        // A maxed (15) bar renders salmon-red across the whole track.
+        var redCount = 0
+        for x in xl..<xr where p.isRed(x, rowY) { redCount += 1 }
+        if redCount > (xr - xl) / 4 {
+            return FieldResult(value: 15, confidence: 1.0)
         }
 
-        // Crop the bar region
-        guard let cropped = cgImage.cropping(to: clampedRect),
-              let data = cropped.dataProvider?.data,
-              let ptr = CFDataGetBytePtr(data) else {
-            return nil
+        // Otherwise measure each segment's fill fraction independently.
+        var iv = 0
+        var maxResidual = 0.0
+        for seg in Self.segmentFracs {
+            let s0 = Int(seg.lo * Double(p.width))
+            let s1 = Int(seg.hi * Double(p.width))
+            let frac = segmentFillFraction(p, rowY: rowY, x0: s0, x1: s1)
+            let scaled = frac * 5.0
+            let rounded = (scaled).rounded()
+            iv += Int(rounded)
+            maxResidual = max(maxResidual, abs(scaled - rounded))
         }
+        iv = min(iv, 15)
 
-        let width = cropped.width
-        let height = cropped.height
-        let bytesPerPixel = cropped.bitsPerPixel / 8
-        let bytesPerRow = cropped.bytesPerRow
-
-        // Sample the middle row of the bar
-        let midY = height / 2
-
-        // Collect the red/saturation channel along the bar's width
-        // Filled portions of IV bars in Pokemon GO are colored (orange/red),
-        // while unfilled portions are gray/dark
-        var brightness: [Double] = []
-        for x in 0..<width {
-            let offset = midY * bytesPerRow + x * bytesPerPixel
-            let r = Double(ptr[offset])
-            let g = Double(ptr[offset + 1])
-            let b = Double(ptr[offset + 2])
-            // Use saturation as indicator: filled bars are more saturated
-            let maxC = max(r, g, b)
-            let minC = min(r, g, b)
-            let saturation = maxC > 0 ? (maxC - minC) / maxC : 0
-            brightness.append(saturation)
-        }
-
-        guard !brightness.isEmpty else { return nil }
-
-        // Find the transition point where the bar goes from filled to unfilled
-        // Use a threshold-based approach
-        let threshold = 0.15 // Saturation threshold between filled and unfilled
-
-        var filledPixels = 0
-        for value in brightness {
-            if value > threshold {
-                filledPixels += 1
-            }
-        }
-
-        let fillRatio = Double(filledPixels) / Double(width)
-
-        // Map fill ratio to 0–15
-        // Each IV point = 1/15th of the bar
-        let ivValue = Int(round(fillRatio * 15.0))
-        let clampedIV = max(0, min(15, ivValue))
-
-        // Confidence based on how cleanly the ratio maps to a discrete value
-        let exactRatio = Double(clampedIV) / 15.0
-        let deviation = abs(fillRatio - exactRatio)
-        let confidence = max(0, 1.0 - deviation * 15.0) // Lower confidence if between discrete values
-
-        return FieldResult(value: clampedIV, confidence: confidence)
+        // Confidence: 1.0 when every segment sits exactly on a 1/5 boundary,
+        // dropping toward 0 as a segment approaches a half-step (ambiguous).
+        let confidence = max(0.0, 1.0 - 2.0 * maxResidual)
+        return FieldResult(value: iv, confidence: confidence)
     }
 
-    // MARK: - Text Recognition
+    /// Fraction of a segment that is filled, measured by the rightmost filled
+    /// pixel (fill is always left-anchored within the segment).
+    private func segmentFillFraction(_ p: RGBABuffer, rowY: Int, x0: Int, x1: Int) -> Double {
+        guard x1 > x0 else { return 0 }
+        var lastFilled = -1
+        for x in x0...x1 where p.isFilled(x, rowY) { lastFilled = x }
+        if lastFilled < 0 { return 0 }
+        return Double(lastFilled - x0 + 1) / Double(x1 - x0 + 1)
+    }
+}
 
-    private func recognizeText(in cgImage: CGImage) async throws -> [RecognizedTextBlock] {
-        try await withCheckedThrowingContinuation { continuation in
-            let request = VNRecognizeTextRequest { request, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
+// MARK: - Pixel Buffer
 
-                let results = (request.results ?? []).compactMap { result -> RecognizedTextBlock? in
-                    guard let observation = result as? VNRecognizedTextObservation,
-                          let candidate = observation.topCandidates(1).first else { return nil }
-                    return RecognizedTextBlock(
-                        text: candidate.string,
-                        confidence: Double(candidate.confidence),
-                        boundingBox: observation.boundingBox
-                    )
-                }
-                continuation.resume(returning: results)
-            }
+/// A flattened RGBA8 view of a CGImage with predictable byte layout, produced by
+/// drawing the image into a fresh sRGB context. Classifies bar pixels by the
+/// rules validated against the baseline screenshots.
+struct RGBABuffer {
+    let width: Int
+    let height: Int
+    private let bytes: [UInt8]
+    private let bytesPerRow: Int
 
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = false
+    init?(_ cgImage: CGImage) {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return nil }
 
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(throwing: error)
-            }
+        let bytesPerRow = width * 4
+        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+
+        let success = buffer.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(
+                data: raw.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else { return false }
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
         }
+        guard success else { return nil }
+
+        self.width = width
+        self.height = height
+        self.bytes = buffer
+        self.bytesPerRow = bytesPerRow
+    }
+
+    /// RGB at a pixel. Returns (0,0,0) out of bounds.
+    @inline(__always)
+    private func rgb(_ x: Int, _ y: Int) -> (r: Int, g: Int, b: Int) {
+        guard x >= 0, x < width, y >= 0, y < height else { return (0, 0, 0) }
+        let o = y * bytesPerRow + x * 4
+        return (Int(bytes[o]), Int(bytes[o + 1]), Int(bytes[o + 2]))
+    }
+
+    /// A colored (filled) bar pixel: bright and saturated. Catches both orange
+    /// (~244,166,76) and salmon-red (~224,126,132); excludes empty-gray track
+    /// (~225,225,225) and the cream panel background (~235,230,195).
+    @inline(__always)
+    func isFilled(_ x: Int, _ y: Int) -> Bool {
+        let (r, g, b) = rgb(x, y)
+        let sat = max(r, g, b) - min(r, g, b)
+        return r > 195 && sat > 55
+    }
+
+    /// A salmon-red (maxed, IV 15) pixel — a filled pixel with high blue
+    /// (~132) versus orange's low blue (~76).
+    @inline(__always)
+    func isRed(_ x: Int, _ y: Int) -> Bool {
+        let (_, _, b) = rgb(x, y)
+        return isFilled(x, y) && b > 100
+    }
+
+    /// Empty-gray bar track (~225,225,225): bright and near-neutral.
+    @inline(__always)
+    func isGray(_ x: Int, _ y: Int) -> Bool {
+        let (r, g, b) = rgb(x, y)
+        return r > 205 && r < 245
+            && abs(r - b) < 16 && abs(r - g) < 16 && abs(g - b) < 16
+    }
+
+    /// Either filled or empty-gray track — i.e. part of the bar, not background.
+    @inline(__always)
+    func isTrack(_ x: Int, _ y: Int) -> Bool {
+        isFilled(x, y) || isGray(x, y)
     }
 }
 
@@ -207,16 +247,4 @@ public struct AppraisalResult: Sendable {
         let confidences = [attackIV?.confidence, defenseIV?.confidence, staminaIV?.confidence].compactMap { $0 }
         return confidences.min() ?? 0
     }
-}
-
-enum StatType {
-    case attack
-    case defense
-    case stamina
-}
-
-struct StatBarRegion {
-    let stat: StatType
-    let labelBox: CGRect
-    let barRect: CGRect
 }

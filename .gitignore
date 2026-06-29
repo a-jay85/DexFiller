@@ -6,3 +6,6 @@ DerivedData/
 *.swp
 *~
 .claude/
+
+# Personal test screenshots
+fixtures/
