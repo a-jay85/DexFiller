@@ -1,5 +1,5 @@
 import Testing
-@testable import DexFillerCore
+@testable import GoDexCore
 
 @Suite("StardustLevelTable Tests")
 struct StardustLevelTableTests {

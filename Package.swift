@@ -3,33 +3,33 @@
 import PackageDescription
 
 let package = Package(
-    name: "DexFiller",
+    name: "GoDex",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .library(name: "DexFillerCore", targets: ["DexFillerCore"]),
-        .executable(name: "dexfill", targets: ["DexFillerCLI"]),
+        .library(name: "GoDexCore", targets: ["GoDexCore"]),
+        .executable(name: "godex", targets: ["GoDexCLI"]),
     ],
     targets: [
         .executableTarget(
-            name: "DexFiller",
-            dependencies: ["DexFillerCore"],
-            path: "Sources/DexFiller"
+            name: "GoDex",
+            dependencies: ["GoDexCore"],
+            path: "Sources/GoDex"
         ),
         .executableTarget(
-            name: "DexFillerCLI",
-            dependencies: ["DexFillerCore"],
-            path: "Sources/DexFillerCLI"
+            name: "GoDexCLI",
+            dependencies: ["GoDexCore"],
+            path: "Sources/GoDexCLI"
         ),
         .target(
-            name: "DexFillerCore",
-            path: "Sources/DexFillerCore"
+            name: "GoDexCore",
+            path: "Sources/GoDexCore"
         ),
         .testTarget(
-            name: "DexFillerCoreTests",
-            dependencies: ["DexFillerCore"],
-            path: "Tests/DexFillerCoreTests"
+            name: "GoDexCoreTests",
+            dependencies: ["GoDexCore"],
+            path: "Tests/GoDexCoreTests"
         ),
     ]
 )

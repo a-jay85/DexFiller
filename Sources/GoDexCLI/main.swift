@@ -1,4 +1,4 @@
-import DexFillerCore
+import GoDexCore
 import Foundation
 
 // MARK: - Output helpers
@@ -16,10 +16,10 @@ func fail(_ message: String) -> Never {
 // MARK: - Argument parsing
 
 let usage = """
-dexfill — extract Pokemon GO data from a screen-recording video
+godex — extract Pokemon GO data from a screen-recording video
 
 USAGE:
-    dexfill <video> [options]
+    godex <video> [options]
 
 ARGUMENTS:
     <video>                 Path to the input video (.mov/.mp4).

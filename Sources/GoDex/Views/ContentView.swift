@@ -24,7 +24,7 @@ struct ContentView: View {
                 Image(systemName: "sparkle.magnifyingglass")
                     .font(.system(size: 36))
                     .foregroundStyle(.tint)
-                Text("DexFiller")
+                Text("GoDex")
                     .font(.title2.bold())
                 Text("Pokemon GO Data Exporter")
                     .font(.caption)

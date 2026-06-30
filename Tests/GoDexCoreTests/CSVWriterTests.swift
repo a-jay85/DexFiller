@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import DexFillerCore
+@testable import GoDexCore
 
 @Suite("CSVWriter Tests")
 struct CSVWriterTests {

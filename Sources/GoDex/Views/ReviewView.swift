@@ -1,4 +1,4 @@
-import DexFillerCore
+import GoDexCore
 import SwiftUI
 
 /// Review mode for low-confidence Pokemon entries.

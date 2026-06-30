@@ -1,6 +1,6 @@
-# DexFiller
+# GoDex
 
-Export your Pokémon GO collection to CSV. DexFiller processes screen recordings
+Export your Pokémon GO collection to CSV. GoDex processes screen recordings
 of your Pokémon info and appraisal screens, extracts every field via on-device
 OCR and image analysis, and writes a flat CSV you actually own — for custom
 analysis, team-building, and goal tracking.
@@ -13,10 +13,10 @@ analysis, team-building, and goal tracking.
 ## Why
 
 Existing OCR tools (PokéGenie, CalcyIV) lock your data inside their own UIs.
-DexFiller's only job is extraction — it hands you a plain CSV and gets out of
+GoDex's only job is extraction — it hands you a plain CSV and gets out of
 the way.
 
-**ToS note:** DexFiller never touches the Pokémon GO client, Niantic's servers,
+**ToS note:** GoDex never touches the Pokémon GO client, Niantic's servers,
 or live game data. It processes video files after the fact, the same approach as
 existing screenshot-based OCR tools.
 
@@ -53,9 +53,9 @@ catch_location, weight, height, shiny, lucky, shadow, purified, confidence
 
 | Path | What |
 |------|------|
-| `Sources/DexFillerCore/` | Platform-agnostic processing library (the pipeline) |
-| `Sources/DexFiller/` | SwiftUI macOS app (import, progress, review, export) |
-| `Tests/DexFillerCoreTests/` | Unit tests for dedup, CSV, stardust→level, records |
+| `Sources/GoDexCore/` | Platform-agnostic processing library (the pipeline) |
+| `Sources/GoDex/` | SwiftUI macOS app (import, progress, review, export) |
+| `Tests/GoDexCoreTests/` | Unit tests for dedup, CSV, stardust→level, records |
 
 ## Build & test
 

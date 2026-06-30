@@ -1,7 +1,7 @@
 import CoreGraphics
 import ImageIO
 import XCTest
-@testable import DexFillerCore
+@testable import GoDexCore
 
 /// Phase 0 regression: runs the IV-bar extractor against the hand-verified
 /// baseline screenshots and asserts it reproduces the labels in
@@ -15,7 +15,7 @@ final class AppraisalExtractorTests: XCTestCase {
     /// Repo-root/fixtures, resolved relative to this source file.
     private var fixturesDir: URL {
         URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // DexFillerCoreTests
+            .deletingLastPathComponent()   // GoDexCoreTests
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // repo root
             .appendingPathComponent("fixtures")

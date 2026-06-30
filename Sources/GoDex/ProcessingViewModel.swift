@@ -1,4 +1,4 @@
-import DexFillerCore
+import GoDexCore
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers

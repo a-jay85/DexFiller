@@ -1,5 +1,5 @@
 import Testing
-@testable import DexFillerCore
+@testable import GoDexCore
 
 @Suite("Deduplicator Tests")
 struct DeduplicatorTests {

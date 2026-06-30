@@ -1,5 +1,5 @@
 import XCTest
-@testable import DexFillerCore
+@testable import GoDexCore
 
 /// Unit tests for `PokemonLinker.merge` — the pure rules that combine an
 /// appraisal read with the preceding info-screen record. Exercises the

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct DexFillerApp: App {
+struct GoDexApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
